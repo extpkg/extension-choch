@@ -1,0 +1,23 @@
+{
+	"manifest_version": "ext-v1",
+	"name": "CHOCH",
+	"version": "1.0.2",
+	"description": "A 10-20 minute long game about a web crawler, metaphorized as spider, scraping the private network, metaprhorized as 2D space full of deadly lasers, looking for the oh-so-important missing page of unknown content.",
+	"author": "EXT, Inc.",
+	"homepage_url": "https://github.com/kostik1337/CHOCH",
+	"icons": {
+		"128": "icon-128.png",
+		"background": "icon-background.png",
+		"banner": "icon-banner.png"
+	},
+	"scripts": [
+		"main.js"
+	],
+	"modules": {
+		"console": {},
+		"runtime": {},
+		"tabs": {},
+		"windows": {},
+		"webviews": {}
+	}
+}
