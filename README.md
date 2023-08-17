@@ -20,7 +20,7 @@ Steps to re-create this extension:
 
 ```javascript
    if (speed.x < 0.001 && speed.x > -0.001 && speed.y < 0.001 && speed.y > -0.001) spiderAngle = PI/2.;
-   This fixes the MacOS bug where the screen went black when the player speed was zero (on death or on startup)
+   // This fixes the MacOS bug where the screen went black when the player speed was zero (on death or on startup)
 ```
 
 8. Run gulp build_release and copy the index.html to extension directory
