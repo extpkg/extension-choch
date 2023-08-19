@@ -12,6 +12,7 @@ ext.runtime.onExtensionClick.addListener(async () => {
 
     // Check if window already exists
     if (created && window !== null) {
+      await ext.windows.restore(window.id)
       await ext.windows.focus(window.id)
       return
     }
