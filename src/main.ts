@@ -2,9 +2,9 @@
 
 // Global resources
 let created = false
-let tab = null
-let window = null
-let webview = null
+let tab: ext.tabs.Tab | null = null
+let window: ext.windows.Window | null = null
+let webview: ext.webviews.Webview | null = null
 
 // Extension clicked
 ext.runtime.onExtensionClick.addListener(async () => {
@@ -19,7 +19,7 @@ ext.runtime.onExtensionClick.addListener(async () => {
 
     // Create tab
     tab = await ext.tabs.create({
-      icon: 'icon-128.png',
+      icon: 'icons/icon-128.png',
       text: 'CHOCH',
       muted: false,
       mutable: true,
@@ -29,8 +29,7 @@ ext.runtime.onExtensionClick.addListener(async () => {
     // Create window
     window = await ext.windows.create({
       title: 'CHOCH',
-      icon: 'icon-128.png',
-      titleBarStyle: 'default',
+      icon: 'icons/icon-128.png',
       fullscreenable: true,
       vibrancy: false,
       frame: true,
@@ -61,8 +60,8 @@ ext.tabs.onRemoved.addListener(async (event) => {
 
     // Remove objects
     if (event.id === tab?.id) {
-      if (window !== null) await ext.windows?.remove(window.id)
-      if (webview !== null) await ext.webviews?.remove(webview.id)
+      if (window !== null) await ext.windows.remove(window.id)
+      if (webview !== null) await ext.webviews.remove(webview.id)
       tab = window = webview = null
     }
 
@@ -98,9 +97,9 @@ ext.tabs.onClickedClose.addListener(async (event) => {
 
     // Remove objects
     if (event.id === tab?.id) {
-      if (tab !== null) await ext.tabs?.remove(tab.id)
-      if (window !== null) await ext.windows?.remove(window.id)
-      if (webview !== null) await ext.webviews?.remove(webview.id)
+      if (tab !== null) await ext.tabs.remove(tab.id)
+      if (window !== null) await ext.windows.remove(window.id)
+      if (webview !== null) await ext.webviews.remove(webview.id)
       tab = window = webview = null
     }
 
@@ -137,8 +136,8 @@ ext.windows.onRemoved.addListener(async (event) => {
 
     // Remove objects
     if (event.id === window?.id) {
-      if (tab !== null) await ext.tabs?.remove(tab.id)
-      if (webview !== null) await ext.webviews?.remove(webview.id)
+      if (tab !== null) await ext.tabs.remove(tab.id)
+      if (webview !== null) await ext.webviews.remove(webview.id)
       tab = window = webview = null
     }
 
@@ -156,8 +155,8 @@ ext.windows.onClosed.addListener(async (event) => {
 
     // Remove objects
     if (event.id === window?.id) {
-      if (tab !== null) await ext.tabs?.remove(tab.id)
-      if (webview !== null) await ext.webviews?.remove(webview.id)
+      if (tab !== null) await ext.tabs.remove(tab.id)
+      if (webview !== null) await ext.webviews.remove(webview.id)
       tab = window = webview = null
     }
 
