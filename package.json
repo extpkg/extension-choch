@@ -10,11 +10,11 @@
     "lint": "eslint ."
   },
   "devDependencies": {
-    "@extpkg/types-console": "^1.0.0",
-    "@extpkg/types-runtime": "^1.0.0",
-    "@extpkg/types-tabs": "^1.0.0",
-    "@extpkg/types-webviews": "^1.0.0",
-    "@extpkg/types-windows": "^1.0.0",
+    "@extpkg/types-console": "^1.0.1",
+    "@extpkg/types-runtime": "^1.1.0",
+    "@extpkg/types-tabs": "^1.1.0",
+    "@extpkg/types-webviews": "^1.0.1",
+    "@extpkg/types-windows": "^1.0.1",
     "@typescript-eslint/eslint-plugin": "^6.4.1",
     "@typescript-eslint/parser": "^6.4.1",
     "copy-webpack-plugin": "^11.0.0",
