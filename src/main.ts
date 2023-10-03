@@ -35,7 +35,8 @@ ext.runtime.onExtensionClick.addListener(async () => {
       vibrancy: false,
       frame: true,
       minWidth: 650,
-      minHeight: 460
+      minHeight: 460,
+      aspectRatio: 650 / 460
     })
 
     // Create webview
