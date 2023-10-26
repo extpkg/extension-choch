@@ -1,0 +1,31 @@
+{
+  "manifest_version": "ext-v1",
+  "name": "CHOCH",
+  "short_name": "CHOCH",
+  "description": "CHOCH: 404 Game Not Found",
+  "version": "1.0.0",
+  "author": "EXT, Inc.",
+  "icons": {
+    "128": "./assets/128.png",
+    "banner": "./assets/banner.png",
+    "background": "./assets/background.png"
+  },
+  "scripts": ["main.js"],
+  "modules": {
+    "runtime": {
+      "permissions": []
+    },
+    "tabs": {
+      "permissions": []
+    },
+    "windows": {
+      "permissions": []
+    },
+    "webviews": {
+      "permissions": []
+    },
+    "websessions": {
+      "permissions": []
+    }
+  }
+}

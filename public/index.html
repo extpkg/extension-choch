@@ -1,0 +1,1919 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0"
+    />
+    <title>CHOCH</title>
+
+    <style type="text/css">
+      * {
+        padding: 0;
+        margin: 0;
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        height: 100%;
+        overflow: hidden;
+      }
+
+      #frame {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 32px;
+        background-color: transparent;
+        z-index: 2;
+        -webkit-app-region: drag;
+      }
+
+      body {
+        margin: 0;
+        padding: 0;
+      }
+
+      #glcanvas {
+        position: absolute;
+      }
+
+      #canvas2d {
+        display: none;
+      }
+
+      #timer {
+        position: absolute;
+        z-index: 2;
+        top: 90%;
+        right: 10%;
+        color: white;
+        font:
+          bold 2rem "Andale Mono",
+          "Courier New",
+          monospace;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="frame"></div>
+
+    <canvas id="glcanvas"></canvas>
+    <canvas id="canvas2d"></canvas>
+
+    <script>
+      // File starts with 01 to be first in preprocessing chain
+
+      const vsSource = `
+        precision mediump float;
+        attribute vec2 aPos;
+        
+        void main() {
+          gl_Position = vec4(aPos, 0., 1.);
+        }
+        
+        `;
+
+      const gameFsSource = `
+        precision mediump float;
+        uniform float t;
+        uniform vec2 res;
+        uniform vec2 pos;
+        uniform vec2 speed;
+        // cam.xy = cam position, cam.zw - cam zoom
+        uniform vec4 cam;
+        
+        const float playerSize = 0.03;
+        // room size
+        const vec2 csize = vec2(1., 2.5);
+        const vec2 axis60 = vec2(sqrt(3.)/2., .5), axis60N = vec2(-sqrt(3.)/2., .5);
+        
+        const vec3 checkpointColor = vec3(0.5, 9., 0.4);
+        const vec3 checkpointBgColor = checkpointColor/5.;
+        const vec3 deadlyColor = vec3(3.5,.5,.1) / 2.;
+        const vec3 deadlyBgColor = deadlyColor / 6.;
+        const vec3 solidColor = vec3(.8,.8,1.);
+        const vec3 backgroundDecorColor = vec3(.03);
+        const vec3 bgColor = vec3(0.07, 0.07, 0.13);
+        
+        #define PI 3.14159265
+        #define LAYERS 6.0
+        #define NOISE_AMP 0.0
+        
+        float hash(float x) {return fract(sin(x)*31345.23);}
+        float hash2(vec2 x) {return hash(dot(x, vec2(43.123, 32.12345)));}
+        
+        float smoothNoise(float x) {
+          return mix(hash(floor(x)), hash(floor(x)+1.), smoothstep(0.,1.,fract(x)));
+        }
+        
+        mat2 mr(float a) {float s=sin(a),c=cos(a);return mat2(c,s,-s,c);}
+        
+        // copied from iq's sdf functions
+        float sdBox(vec2 p, vec2 b) {
+          vec2 d = abs(p)-b;
+          return length(max(d,0.0)) + min(max(d.x,d.y),0.0);
+        }
+        
+        float sdCircle(vec2 p, float r) {return length(p)-r;}
+        
+        float sdCross(vec2 p, vec2 size) {
+          return min(
+              sdBox(p, size),
+              sdBox(p, size.yx)
+          );
+        }
+        
+        struct MapValue {
+          float solid; // solid < 0 - point is solid (distance to closest solid)
+          float deadly; // deadly and checkpoint work the same way
+          float checkpoint;
+          float checkpointId; // id of checkpoint, if checkpoint in current point
+        };
+        
+        // gles 2 somehow doesn't support 1./0.
+        #define INF 1e10
+        
+        float roomFans(vec2 p) {
+          vec2 pdead = p - vec2(-0.3, -0.4);
+          pdead *= mr(t);
+          float deadly = sdCross(pdead, vec2(0.05, 0.45));
+        
+          pdead = p - vec2(0.3, 0.1);
+          pdead *= mr(-t+PI/4.);
+          deadly = min(deadly, sdCross(pdead, vec2(0.05, 0.45)));
+        
+          pdead = p - vec2(-0.3, 0.7);
+          pdead *= mr(t+PI/8.);
+          deadly = min(deadly, sdCross(pdead, vec2(0.05, 0.45)));
+        
+          return deadly;
+        }
+        
+        float roomLasers(vec2 p) {
+          float scale = .5;
+          vec2 axes[3];
+          axes[0] = vec2(0., 1.);
+          axes[1] = axis60;
+          axes[2] = axis60N;
+          float deadly = INF;
+          for (int i=0;i<3;++i) {
+            float pdot = dot(p, axes[i]) + t/32.;
+            float pfr = abs(mod(pdot, scale) - scale/2.);
+            float fl = floor(pdot*scale);
+            float s = sin(t*2. + pdot*2. + .66*PI*float(i));
+            deadly = min(deadly, pfr + scale/16.* (s+.5));
+          }
+          return deadly;
+        }
+        
+        float roomSines1(vec2 p) {
+          float mult = 10.;
+          float dead = sin(p.x*mult) * sin(p.y*mult) + .7*sin(2.*t + 5.*p.y + 10.*p.x) + .5;
+          return dead/mult;
+        }
+        
+        float roomSines2(vec2 p) {
+          float mult = 10.;
+          float dead = sin(p.x*mult) * sin(p.y*mult + t/3.) + .7*sin(2.*t + 5.*p.y + sin(.3*t)) + .4;
+          return dead/mult;
+        }
+        
+        float roomPolar1(vec2 p) {
+          p = vec2(length(p), atan(p.y, p.x));
+          float lenMul = .3, holeMul = PI/6.;
+          float l = p.x - t/6.;
+          float rotDirection = mod(floor(l/lenMul),2.) == 0. ? -1. : 1.;
+          float holes = (abs(mod(p.y + t/4. * rotDirection, holeMul) - lenMul/2.) - holeMul/4.)*p.x;
+          float deadly = max((abs(mod(l, lenMul) - lenMul/2.)-lenMul/10.), holes);
+          return deadly;
+        }
+        
+        float roomCircleInv(vec2 p) {
+          float d = dot(p, p);
+          p /= d;
+          vec2 size = vec2(1., 2.5);
+          p.y += .45*t;
+          vec2 cell = floor(p/size);
+          p.x += .7*t* mix(-1.,1.,mod(cell.y, 2.));
+          vec2 mp = abs(mod(p, size) - size/2.)-size/2.5;
+          cell = floor(p/size);
+          float iscell = step(.5,mod(cell.x+cell.y, 2.));
+          float deadly = mix(max(mp.x, mp.y), 1000., iscell);
+          return deadly * d;
+        }
+        
+        float roomPotential(vec2 p) {
+          float pot = 0.;
+          const float I = 4.;
+          for(float i=0.;i<I;++i) {
+            vec2 off = vec2(0., mix(-.9,.9,i/(I-1.)));
+            off.y += .22*sin(t + PI/2.*i);
+            off.x += .1*sin(t + PI/3.*i);
+            pot += 1. / length(p-off);
+          }
+          float potInv = 1./(pot);
+          float modSize = .03;
+          float deadly = max(.09-potInv, abs(mod(potInv-t/30., modSize)-modSize/2.)-modSize/2.3);
+          return deadly;
+        }
+        
+        float roomRandomWaves(vec2 p) {
+          float sz = .3;
+          float factor = (sin(t)+1.)/2.;
+          p.y -= t/6.;
+          p.x += factor*smoothNoise(p.y*5.+123. + t) * .5;
+          p.y += factor*smoothNoise(p.x*5. + .4*t) * .4;
+          return abs(mod(p.y, sz) - sz/2.)-sz/20.;
+        }
+        
+        float roomFractal1(vec2 p) {
+          const float I = 3.;
+          for (float i=0.;i<I;++i) {
+            p.x = abs(p.x);
+            p.x -= .3;
+            p.y -= .1;
+            p = p*mr(2.*PI/I);
+          }
+          
+          float s = 0.4;
+          p.y -= t/10.;
+          p.x -= t/20.;
+          vec2 mp = abs(mod(p, s)-s/2.)-s/3.;
+          return max(mp.x, mp.y);
+        }
+        
+        // seems unpassable, but maybe I could fix it...
+        float roomFractal2(vec2 p) {
+          const float I = 6.;
+          for (float i=0.;i<I;++i) {
+            p.x = abs(p.x);
+            p.x -= .3;
+            p.y += .1;
+            p *= mr(2.*PI/I);
+          }
+          p *= mr(PI/3.);
+          
+          float s = 0.4;
+          p.y -= t/10.;
+          p.x -= t/20.;
+          vec2 mp = abs(mod(p, s)-s/2.)-s/3.;
+          return max(mp.x, mp.y);
+        }
+        
+        float roomBoxesTrace(vec2 p) {
+          vec2 size = vec2(.2);
+          vec2 mp = mod(p, size)-size/2.;
+          vec2 cell = floor(p/size);
+          vec2 sst = vec2(0.);
+          vec2 cellDiv = vec2(5., 30.);
+          cell.x += .5;
+          float f = .5 +
+            (.25*sin(1.*cell.y - t) +
+            .75*sin(.8*cell.x + 2.*sin(t))
+            ) *.5;
+          mp *= mr((1.-f)*PI);
+          return sdBox(mp, mix(vec2(-.05),size/2.1, f));
+        }
+        
+        float roomCirclesSizeMod(vec2 p) {
+          float size = .4;
+          p *= mr(PI/4.);
+          p.x += size/2.;
+          vec2 mp = mod(p, size)-size/2.;
+          vec2 cell = floor(p/size);
+          
+          vec2 circleSizes = vec2(size/32., size/2.3);
+          float field1 = sdCircle(mp, mix(circleSizes.x, circleSizes.y, sin(t)*.5+.5));
+          mp = mod(p+size/2., size)-size/2.;
+          float field2 = sdCircle(mp, mix(circleSizes.x, circleSizes.y, sin(t+PI)*.5+.5));
+          return min(field1, field2);
+        }
+        
+        float roomBoxes(vec2 p) {
+          float size = 0.15;
+          vec2 p1 = vec2(0., mod(p.y, size) - size/2.);
+          float yFloor = floor(p.y/size);
+          p1.x = abs(p.x+0.1*sin(yFloor + t/4.));
+          float freq = .5 + yFloor * size * 3.;
+          return max(abs(p1.y)-size/3., .2+.2*sin(freq*t + 123.)-p1.x);
+        }
+        
+        float roomBoxes2(vec2 p) {
+          float size = 0.103;
+          vec2 p1 = vec2(p.x, mod(p.y, size) - size/2.);
+          float yFloor = floor(p.y/size);
+          float freq = .5 + yFloor * 1.;
+          return sdBox(p1 - vec2(.41*sin(10.*yFloor + t), 0.), vec2(.1, size/2.2));
+        }
+        
+        float roomPolarMod(vec2 p) {
+          const float I = 3.;
+          p.x *= p.y>0.?1.:-1.;
+          p.y = abs(p.y);
+          p.y -= .6;
+          float f = smoothstep(0., 1., fract(t)) *2.*PI/I;
+          p *= mr(f);
+          vec2 pp = vec2(length(p), atan(p.y, p.x));
+          pp.y = mod(pp.y, 2.*PI/I) - PI/I;
+          p = vec2(pp.x*cos(pp.y), pp.x*sin(pp.y)) - vec2(.37, 0.);
+          p *= mr(-I*f);
+          return sdBox(p, vec2(0.06));
+        }
+        
+        float roomPolarMod2(vec2 p) {
+          float deadly = INF;
+          float boxSize = 0.06;
+          for(float i=0.;i<3.;++i) {
+            float boxOff = .2 * (i+1.);
+            vec2 p1 = p;
+            //p1 *= mr(t/2. * mix(-1.,1.,mod(i, 2.)));
+            float I = floor(2.*boxOff/boxSize)+3.;
+            float angle = 2.*PI/I;
+            vec2 pp = vec2(length(p1), atan(p1.y, p1.x)+angle/2.);
+            float angFloor = floor(pp.y / angle);
+            if (abs(angFloor) >= I/2.) angFloor = abs(angFloor);
+            pp.y = mod(pp.y, angle) - angle/2.;
+            p1 = vec2(pp.x*cos(pp.y), pp.x*sin(pp.y)) - vec2(boxOff, 0.);
+            vec2 sz = vec2(boxSize);
+            sz *= mix(-.3, .7, smoothstep(-.4, .4, sin(angFloor + t)));
+            deadly = min(deadly, sdBox(p1, sz));
+          }
+          return deadly;
+        }
+        
+        float roomMovingCorridor(vec2 p) {
+          float tmult = 1., ymult = 3.;
+          float noise1 = smoothNoise(p.y*ymult + 123.*floor(tmult*t) - t);
+          float noise2 = smoothNoise(p.y*ymult + 123.*floor(tmult*t+1.) - t);
+          p.x += .3*(mix(noise1, noise2, smoothstep(0., 1., fract(tmult*t)))-.5);
+          float waveMod = .2;
+          float waves = abs(mod(dot(p-t/30., axis60), waveMod)-waveMod/2.)-waveMod/2.1;
+          return max(.1 - abs(p.x), waves);
+        }
+        
+        vec2 roomSolidWait(vec2 p) {
+          float ysize = 1.5, corrWidth = .3;
+          vec2 sp = p;
+          sp.y += 0.5 * ysize * step(0.,sp.x);
+          sp.y = mod(sp.y, ysize) - ysize/2.;
+          sp.x = abs(sp.x);
+          float solid = abs(p.x) - corrWidth;
+          solid = min(solid, sdBox(sp - vec2(corrWidth+0.03, 0.), vec2(.1)));
+          
+          vec2 dp = p;
+          dp.y = mod(dp.y+.5, ysize/2.) - ysize / 4.;
+          vec2 deadlyBoxSize = mix(vec2(.1), vec2(.29, .5), smoothstep(0.1, 0.5, sin(t*1.2)));
+          float deadly = sdBox(dp, deadlyBoxSize);
+          return vec2(-solid, deadly);
+        }
+        
+        vec2 roomEndCheckpoint(vec2 p) {
+          float scale = 8.;
+          p.y += .7;
+          p *= scale;
+          p.x += 1.8;
+          float m = sdBox(p, vec2(.8, 1.));
+          m = max(m, -sdBox(p-vec2(-.5, .4), vec2(.4, .1)));
+          m = max(m, -sdBox(p-vec2(.5, -.2), vec2(.4, .1)));
+        
+          m = min(m, sdBox(p-vec2(1.8, 0.), vec2(.8, 1.)));
+          m = max(m, -sdBox(p-vec2(1.8, 0.), vec2(.1, .5)));
+        
+          m = min(m, sdBox(p-vec2(3.6, 0.), vec2(.8, 1.)));
+          m = max(m, -sdBox(p-vec2(3.6, 0.), vec2(.1, .5)));
+        
+          return vec2(m/scale, 255.);
+        }
+        
+        MapValue map(vec2 p) {
+          float row = floor(p.y/csize.y);
+          ivec2 cid = ivec2(floor(p/csize));
+          vec2 p1 = mod(p, csize) - csize/2.;
+          MapValue val;
+          
+          bool isRoom = true;
+          // room.x - solids (additional to room bounds), room.y - deadly objects, room.zw - checkpoint (game ender)
+          vec4 room = vec4(INF, INF, INF, 0.);
+          if (cid.x == 0) {
+            if (cid.y == 0) room.y = roomFans(p1);
+            else if (cid.y == 1) room.y = roomPotential(p1);
+            else if (cid.y == 2) room.y = roomPolarMod2(p1);
+            else if (cid.y == 3) room.y = roomMovingCorridor(p1);
+            else if (cid.y == 4) room.y = roomCirclesSizeMod(p1);
+            else if (cid.y == 5) room.xy = roomSolidWait(p1);
+            else if (cid.y == 6) room.y = roomSines2(p1);
+            else if (cid.y == 7) room.y = roomPolar1(p1);
+            else if (cid.y == 8) room.y = roomBoxesTrace(p1);
+            else if (cid.y == 9) room.y = roomBoxes2(p1);
+            else if (cid.y == 10) room.y = roomFractal1(p1);
+            else if (cid.y == 11) room.y = roomPolarMod(p1);
+            else if (cid.y == 12) room.y = roomBoxes(p1);
+            else if (cid.y == 13) room.y = roomSines1(p1);
+            else if (cid.y == 14) room.y = roomRandomWaves(p1);
+            else if (cid.y == 15) room.y = roomLasers(p1);
+            else if (cid.y == 16) room.y = roomFractal2(p1);
+            else if (cid.y == 17) room.y = roomCircleInv(p1);
+            else if (cid.y == 18) room.zw = roomEndCheckpoint(p1);
+            else isRoom = false;
+          } else {
+            isRoom = false;
+          }
+        
+          MapValue v = MapValue(-INF, room.y, 0., 0.);
+          vec2 roomSize = csize/2.2;
+          float corridorWidth = .1;
+          if (isRoom) {
+            float roomBox = sdBox(p1, roomSize);
+            vec2 pz = vec2(p1.x, abs(p1.y) - roomSize.y);
+            float deadlyZone = max(roomBox, -sdCircle(pz, corridorWidth));
+            v.deadly = max(v.deadly, deadlyZone);
+            v.solid = min(-roomBox, room.x);
+          }
+        
+          vec2 corrY = vec2(-1., 19. * csize.y); // 19 - rooms count, corrY.x - corridor bottom, corrY.y - corridor top
+          corrY = vec2((corrY.x + corrY.y)/2., (corrY.y - corrY.x)/2.);
+          float corridor = sdBox(p-vec2(.5, corrY.x), vec2(corridorWidth, corrY.y));
+          v.solid = max(v.solid, -corridor);
+          
+          // checkpoints
+          float cpy = mod(p.y + csize.y/2., csize.y) - csize.y/2.;
+          vec2 checkpointWithId = vec2(abs(cpy) - .03, floor((p.y + csize.y/2.) / csize.y));
+          checkpointWithId = mix(checkpointWithId, room.zw, step(room.z, checkpointWithId.x));
+          v.checkpoint = checkpointWithId.x;
+          v.checkpointId = checkpointWithId.y;
+          
+          return v;
+        }
+        
+        vec2 normal(vec2 p) {
+            vec2 E=vec2(0.001, 0.);
+            float m = map(p).solid;
+            return normalize(vec2(
+                map(p+E.xy).solid - m,
+                map(p+E.yx).solid - m
+            ));
+        }
+        
+        float drawLaserBounds(float p, float strength) {
+          return pow(0.001 * strength / abs(p), 2.5);
+        }
+        
+        float renderBg(vec2 uv) {
+          uv *= mat2(sqrt(3.)/2.,-.5,0.,1.);
+        
+          float c = 0.;
+          const float I = 3.;
+          for(float i=0.;i<I;++i) {
+            float f = 40. + 37.*i;
+            vec2 uv1 = uv*f + t/f;
+            vec2 cuv = floor(uv1);
+            vec2 luv = fract(uv1);
+            if(luv.x+luv.y > 1.) {
+              luv = 1.-luv;
+              cuv += .5;
+            }
+            
+            float bound = .03;
+            c += max(
+              step(luv.x, bound),
+            max(
+              step(luv.y, bound),
+              step(1.-luv.x-luv.y, bound)
+            ))
+            * smoothstep(.6, .95, smoothNoise(.6*cuv.x+.5*cuv.y + .3*t + 3.*i)) * mix(1., .3, i/(I-1.));
+          }
+          return c;
+        }
+        
+        vec4 renderLayer(vec2 uv) {
+          MapValue m = map(uv);
+          vec3 c = vec3(0.);
+          if (m.solid > 0.) {
+            c += drawLaserBounds(m.checkpoint, 3.) * checkpointColor;
+            if (m.checkpoint < 0.) {
+              c += checkpointBgColor;
+            }
+            else {
+              c += drawLaserBounds(m.deadly, 3.) * deadlyColor;
+              if (m.deadly < 0.) c += deadlyBgColor;
+            }
+          }
+          c += solidColor * drawLaserBounds(m.solid, 2.);
+          return vec4(c, m.solid);
+        }
+        
+        float sdSegment( in vec2 p, in vec2 a, in vec2 b ) {
+            vec2 pa = p-a, ba = b-a;
+            float h = clamp( dot(pa,ba)/dot(ba,ba), 0.0, 1.0 );
+            return length( pa - ba*h );
+        }
+        
+        float sdPosCircle(vec2 p, float r) {
+          return max(0., length(p)-r);
+        }
+        
+        float renderSpider(vec2 uv) {
+          float radius = playerSize;
+          float c = 0.;
+          float spiderAngle = atan(speed.y, speed.x);
+          if (speed.x < 0.001 && speed.x > -0.001 && speed.y < 0.001 && speed.y > -0.001) spiderAngle = PI/2.;
+        
+          // draw body
+          float bodyRadius = radius / 3.;
+          vec2 uvBody = uv - vec2(0., (sin(4.*t)+1.) * radius / 16. + radius / 3.);
+          c += pow(radius/100. / sdPosCircle(uvBody, bodyRadius), 2.);
+        
+          // draw legs
+          vec2 spiderDirUp = vec2(cos(spiderAngle), sin(spiderAngle));
+          for(float i=0.; i<8.; ++i) {
+            float ang = mix(-PI/4., PI/4., mod(i, 4.)/3.) + step(4., i) * PI - PI/2. + spiderAngle;
+            vec2 legOffset = 0.9*radius*vec2(cos(ang), sin(ang));
+            legOffset += radius * 0.1 *spiderDirUp * sin(20.*t + (mod(i,2.)==0. ? PI: 0.)) * length(speed);
+            // legs ends (circles)
+            //c += pow(radius/100. / sdPosCircle(uv + legOffset, radius/16.), 2.);
+        
+            // legs sticks
+            vec2 uvSeg = uv;
+            float r = clamp(0., 1., length(uv) / radius);
+            uvSeg.y -= 0.01*(r-r*r);
+            //uvSeg += (vec2(linNoise(r*10.-10.*t), linNoise(r*10.+15.-15.*t))-.5) * radius * 0.1;
+            //c += pow(radius/200. / sdSegment(uvSeg, uv-uvBody, -legOffset), 1.2);
+        
+            c += drawLaserBounds(sdSegment(uvSeg, uv-uvBody, -legOffset), r*2.);
+          }
+          c = min(1., c);
+        
+          // draw eyes
+          uvBody *= mr(spiderAngle);
+          uvBody.y = abs(uvBody.y);
+          c -= pow(radius/100. / sdPosCircle(uvBody -
+            vec2(1.,0.) * bodyRadius * 0.7 -
+            vec2(0.,1.) * bodyRadius * 0.3, radius / 40.), 2.);
+        
+          return c;
+        }
+        
+        vec3 renderAll(vec2 uv) {
+          vec3 c = vec3(0.);
+          uv /= cam.zw;
+          for (float i = 0.; i<LAYERS; ++i) {
+            float layerOffset = i/LAYERS*0.04;
+            vec2 uv1 = uv * (1.0-layerOffset) - vec2(0., layerOffset)
+              + vec2(hash2(uv+i+t)-.5, hash2(1.3*uv+i+1.4*t)-.5)*NOISE_AMP;
+            uv1 = uv1 + cam.xy;
+        
+            vec4 layer = renderLayer(uv1);
+            c += layer.rgb / LAYERS;
+            if (i == 0. && layer.a < 0.) c += backgroundDecorColor * renderBg(uv + cam.xy / 5.);
+          }
+          // debug collider
+          //c = mix(c, vec3(0.,0.,0.1), step(length(uv+cam.xy-pos), playerSize));
+          c += renderSpider(uv + cam.xy-pos);
+          return c;
+        }
+        
+        void main() {
+            // pixel 1 - collision check + normal
+            if (gl_FragCoord.x < 1. && gl_FragCoord.y < 1.) {
+                float solid = map(pos).solid;
+                gl_FragColor = vec4(solid < playerSize ? vec3(1., 0.5*(normal(pos)+1.)) : vec3(0.), 1.);
+            } else
+            // pixel 2 - death check
+            if (gl_FragCoord.x < 2. && gl_FragCoord.y < 1.) {
+                gl_FragColor = vec4(vec3(map(pos).deadly < playerSize/2. ? 1. : 0.), 1.);
+            } else
+            // pixel 3 - checkpoint check
+            if (gl_FragCoord.x < 3. && gl_FragCoord.y < 1.) {
+                MapValue m = map(pos);
+                gl_FragColor = vec4(m.checkpoint < 0. ? vec3(1., m.checkpointId/255., 0.) : vec3(0.), 1.);
+            } else {
+                vec2 uv = 2. * gl_FragCoord.xy / res - 1.;
+                uv.x *= res.x / res.y;
+        
+                vec3 c = renderAll(uv);
+        
+                gl_FragColor = vec4(bgColor + sqrt(c), 1.0);
+            }
+        }
+        `;
+
+      const postprocFsSource = `
+        precision mediump float;
+        uniform vec2 res;
+        uniform sampler2D tex;
+        uniform vec3 fact; // fact.x - death factor, fact.y - checkpoint factor, fact.z - end factor
+        
+        void main() {
+            vec2 uv = gl_FragCoord.xy / res;
+            vec2 uvn = abs(uv*2. - 1.);
+            float aberrationSize = 0.003 + 0.015*fact.x;
+            vec3 texel = vec3(
+                texture2D(tex, uv-vec2(aberrationSize, 0.)).r,
+                texture2D(tex, uv).g,
+                texture2D(tex, uv+vec2(aberrationSize, 0.)).b
+            );
+            float darkLen = 0.6;
+            float dark = max(smoothstep(1.-darkLen, 1., uvn.x), smoothstep(1.-darkLen, 1., uvn.y));
+            gl_FragColor = vec4(mix(texel, vec3(0.), 0.25*dark) + vec3(0.,fact.y,0.) + fact.z, 1.);
+        }
+        `;
+
+      const canvasPostprocFsSource = `
+        precision mediump float;
+        uniform vec2 res;
+        uniform sampler2D tex;
+        uniform float t;
+        uniform float ef;
+        
+        const vec3 BLANK = vec3(0.07, 0.07, 0.13);
+        const vec3 borderColor = vec3(.6);
+        
+        vec4 drawTexWithBounds(vec2 uv) {
+            if (uv.x < 0. || uv.x > 1. || uv.y < 0. || uv.y > 1.) return vec4(0.);
+        
+            vec2 auv = abs(2.*uv-1.);
+            vec2 bs = vec2(0.02, 0.002); // bs.x - bounds thickness, bs.y - "smoothness"
+            vec2 bsx = bs * res.y/res.x;
+            float borderLine = max(
+                smoothstep(1.-bsx.x-2.*bsx.y, 1.-bsx.x-bsx.y, auv.x),
+                smoothstep(1.-bs.x-2.*bs.y, 1.-bs.x-bs.y, auv.y) 
+            ) * smoothstep(1., 1.-bsx.y, auv.x) 
+              * smoothstep(1., 1.-bs.y, auv.y);
+        
+            vec4 texel = texture2D(tex, 0.96*uv-0.02);
+            float mult = 1.5;
+            //texel.rgb = pow(texel.rgb*mult, vec3(2.)) / mult;
+            //float scanlines = 1. - 0.4*smoothstep(-.8, .8,sin((uv.y+t/20.) *300.));
+            float scanlines = 1. - 0.1*(sin((uv.y+t/20.) *300.)+1.);
+        
+            return vec4(max(texel.rgb, vec3(borderColor*borderLine)), max(texel.a, borderLine)*scanlines);
+        }
+        
+        vec2 distort(vec2 uv) {
+          float distFactor = 0.05;
+          uv = 2.*uv-1.;
+          return (vec2(
+            uv.x * (1. + distFactor*pow(abs(uv.y), 2.)),
+            uv.y * (1. + distFactor*pow(abs(uv.x), 2.))
+          )+1.)/2.;
+        }
+        
+        vec3 drawAll(vec2 uv) {
+          vec4 texel = drawTexWithBounds(uv) + .2 * drawTexWithBounds((uv-.5) * .99 + .5);
+          return mix(BLANK, texel.rgb, texel.a);
+        }
+        
+        void main() {
+            vec2 uv = gl_FragCoord.xy / res;
+            uv.y = 1. - uv.y;
+            uv = 1.04*uv -0.02;
+        
+            uv = distort(uv);
+            const float aberration = 0.002;
+            
+            vec3 col = vec3(
+                drawAll(uv-vec2(aberration, 0.)).r,
+                drawAll(uv).g,
+                drawAll(uv+vec2(aberration, 0.)).b
+            );
+            gl_FragColor = vec4(col + ef, 1.);
+        }
+        `;
+      class Vec2 {
+        constructor(x, y) {
+          this.x = x;
+          this.y = y;
+        }
+
+        addEq(x, y) {
+          this.x += x;
+          this.y += y;
+        }
+        mulEqScalar(a) {
+          this.x *= a;
+          this.y *= a;
+        }
+        mul(a) {
+          return new Vec2(this.x * a, this.y * a);
+        }
+        mixEq(x, y, t) {
+          this.x = this.x * (1 - t) + x * t;
+          this.y = this.y * (1 - t) + y * t;
+        }
+        len() {
+          return Math.sqrt(this.x * this.x + this.y * this.y);
+        }
+        dot(v) {
+          return this.x * v.x + this.y * v.y;
+        }
+        set(x, y) {
+          this.x = x;
+          this.y = y;
+        }
+      }
+      function initScreenQuadBuffer(gl) {
+        const positionBuffer = gl.createBuffer();
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+
+        const positions = [1.0, 1.0, -1.0, 1.0, 1.0, -1.0, -1.0, -1.0];
+        gl.bufferData(
+          gl.ARRAY_BUFFER,
+          new Float32Array(positions),
+          gl.STATIC_DRAW,
+        );
+
+        return positionBuffer;
+      }
+
+      function initShaderProgram(gl, vsSource, fsSource) {
+        function loadShader(gl, type, source) {
+          const shader = gl.createShader(type);
+
+          gl.shaderSource(shader, source);
+          gl.compileShader(shader);
+
+          return shader;
+        }
+
+        const vertexShader = loadShader(gl, gl.VERTEX_SHADER, vsSource);
+        const fragmentShader = loadShader(gl, gl.FRAGMENT_SHADER, fsSource);
+
+        const shaderProgram = gl.createProgram();
+        gl.attachShader(shaderProgram, vertexShader);
+        gl.attachShader(shaderProgram, fragmentShader);
+        gl.linkProgram(shaderProgram);
+
+        return shaderProgram;
+      }
+
+      function createPostprocTexture(gl, w, h) {
+        let tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        if (w > 0 && h > 0)
+          gl.texImage2D(
+            gl.TEXTURE_2D,
+            0,
+            gl.RGBA,
+            w,
+            h,
+            0,
+            gl.RGBA,
+            gl.UNSIGNED_BYTE,
+            null,
+          );
+
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        return tex;
+      }
+
+      function createFramebufferWithTexture(gl, w, h, oldFbTex) {
+        if (oldFbTex) {
+          gl.deleteTexture(oldFbTex[1]);
+        }
+
+        let tex = createPostprocTexture(gl, w, h);
+        let fb = oldFbTex ? oldFbTex[0] : gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+        gl.framebufferTexture2D(
+          gl.FRAMEBUFFER,
+          gl.COLOR_ATTACHMENT0,
+          gl.TEXTURE_2D,
+          tex,
+          0,
+        );
+        return [fb, tex, w, h];
+      }
+      // everything here from https://github.com/mmckegg/freeverb, with slight modifications
+      var combFilterTunings = [
+        1557, 1617, 1491, 1422, 1277, 1356, 1188, 1116,
+      ].map((f) => f / 44100);
+      var allpassFilterFrequencies = [225, 556, 441, 341];
+
+      function LowpassCombFilter(context) {
+        var node = context.createDelay(1);
+
+        var output = context.createBiquadFilter();
+
+        // this magic number seems to fix everything in Chrome 53
+        // see https://github.com/livejs/freeverb/issues/1#issuecomment-249080213
+        output.Q.value = -3.0102999566398125;
+
+        output.type = "lowpass";
+        node.dampening = output.frequency;
+
+        var feedback = context.createGain();
+        node.resonance = feedback.gain;
+
+        node.connect(output);
+        output.connect(feedback);
+        feedback.connect(node);
+
+        node.dampening.value = 3000;
+        node.delayTime.value = 0.1;
+        node.resonance.value = 0.5;
+
+        return node;
+      }
+
+      function Freeverb(audioContext) {
+        var node = audioContext.createGain();
+        node.channelCountMode = "explicit";
+        node.channelCount = 2;
+
+        var output = audioContext.createGain();
+        var merger = audioContext.createChannelMerger(2);
+        var splitter = audioContext.createChannelSplitter(2);
+        var highpass = audioContext.createBiquadFilter();
+        highpass.type = "highpass";
+        highpass.frequency.value = 200;
+
+        var wet = audioContext.createGain();
+        var dry = audioContext.createGain();
+
+        node.connect(dry);
+        node.connect(wet);
+        wet.connect(splitter);
+        merger.connect(highpass);
+        highpass.connect(output);
+        dry.connect(output);
+
+        var combFilters = [];
+        var allpassFiltersL = [];
+        var allpassFiltersR = [];
+        var roomSize = 0.8;
+        var dampening = 3000;
+
+        // make the allpass filters on the right
+        for (var l = 0; l < allpassFilterFrequencies.length; l++) {
+          var allpassL = audioContext.createBiquadFilter();
+          allpassL.type = "allpass";
+          allpassL.frequency.value = allpassFilterFrequencies[l];
+          allpassFiltersL.push(allpassL);
+
+          if (allpassFiltersL[l - 1]) {
+            allpassFiltersL[l - 1].connect(allpassL);
+          }
+        }
+
+        // make the allpass filters on the left
+        for (var r = 0; r < allpassFilterFrequencies.length; r++) {
+          var allpassR = audioContext.createBiquadFilter();
+          allpassR.type = "allpass";
+          allpassR.frequency.value = allpassFilterFrequencies[r];
+          allpassFiltersR.push(allpassR);
+
+          if (allpassFiltersR[r - 1]) {
+            allpassFiltersR[r - 1].connect(allpassR);
+          }
+        }
+
+        allpassFiltersL[allpassFiltersL.length - 1].connect(merger, 0, 0);
+        allpassFiltersR[allpassFiltersR.length - 1].connect(merger, 0, 1);
+
+        // make the comb filters
+        for (var c = 0; c < combFilterTunings.length; c++) {
+          var lfpf = LowpassCombFilter(audioContext);
+          lfpf.delayTime.value = combFilterTunings[c];
+          if (c < combFilterTunings.length / 2) {
+            splitter.connect(lfpf, 0);
+            lfpf.connect(allpassFiltersL[0]);
+          } else {
+            splitter.connect(lfpf, 1);
+            lfpf.connect(allpassFiltersR[0]);
+          }
+          combFilters.push(lfpf);
+        }
+
+        Object.defineProperties(node, {
+          roomSize: {
+            set: (value) => {
+              roomSize = value;
+              refreshFilters();
+            },
+          },
+          dampening: {
+            set: (value) => {
+              dampening = value;
+              refreshFilters();
+            },
+          },
+        });
+
+        refreshFilters();
+
+        node.connect = output.connect.bind(output);
+        node.disconnect = output.disconnect.bind(output);
+        node.wet = wet.gain;
+        node.dry = dry.gain;
+
+        // expose combFilters for direct automation
+        node.combFilters = combFilters;
+
+        return node;
+
+        // scoped
+
+        function refreshFilters() {
+          for (var i = 0; i < combFilters.length; i++) {
+            combFilters[i].resonance.value = roomSize;
+            combFilters[i].dampening.value = dampening;
+          }
+        }
+      }
+
+      function setupAudioProcessor() {
+        let context = new AudioContext();
+        let t = (dt) => context.currentTime + dt;
+
+        let reverb = Freeverb(context);
+        reverb.roomSize = 0.7;
+        reverb.dampening = 4000;
+        reverb.wet.value = 0.5;
+        reverb.dry.value = 0.0;
+        reverb.connect(context.destination);
+
+        let attackDecay = (param, attack, decay, maxVal = 1, minVal = 0) => {
+          //param.setValueAtTime(1.0, t(0))
+          param.linearRampToValueAtTime(maxVal, t(attack));
+          param.linearRampToValueAtTime(minVal, t(attack + decay));
+          // param.setTargetAtTime(minVal, t(attack), decay/4.);
+        };
+
+        let createRingmodNodes = (freq1, freq2) => {
+          let osc = context.createOscillator();
+          osc.type = "sine";
+          osc.frequency.value = freq1;
+
+          let osc2 = context.createOscillator();
+          osc2.type = "sine";
+          osc2.frequency.value = freq2;
+
+          let ringgain = context.createGain();
+          ringgain.gain.setValueAtTime(0, t(0));
+
+          let gain = context.createGain();
+          gain.gain.setValueAtTime(0, t(0));
+
+          osc.connect(ringgain);
+          osc2.connect(ringgain.gain);
+          ringgain.connect(gain);
+
+          osc.start();
+          osc2.start();
+
+          return [osc, osc2, gain];
+        };
+
+        let setupTypingProcessor = () => {
+          let [, , gain] = createRingmodNodes(834, 1147);
+          let filter = context.createBiquadFilter();
+          filter.Q.setValueAtTime(5, t(0));
+          filter.frequency.setValueAtTime(2500, t(0));
+          filter.type = "bandpass";
+
+          gain.connect(filter);
+          filter.connect(context.destination);
+          return () => {
+            attackDecay(gain.gain, 0.01, 0.1);
+          };
+        };
+
+        let setupMenuChangeProcessor = () => {
+          let [osc, osc2, gain] = createRingmodNodes(0, 0);
+          gain.connect(context.destination);
+          return (freq) => {
+            osc.frequency.value = freq;
+            osc2.frequency.value = freq * 1.33;
+            attackDecay(gain.gain, 0.01, 0.1);
+          };
+        };
+
+        let setupCheckpointProcessor = () => {
+          let [osc, osc2, gain] = createRingmodNodes(0, 0);
+
+          let delayTime = 0.45;
+          let delay = context.createDelay(delayTime);
+          delay.delayTime.setValueAtTime(delayTime, t(0));
+          let delayGain = context.createGain();
+          delayGain.gain.setValueAtTime(0.5, t(0));
+
+          gain.connect(delay);
+          delay.connect(delayGain);
+          delayGain.connect(delay);
+          gain.connect(reverb);
+          delayGain.connect(reverb);
+
+          let freqs = [440, 220, 440];
+
+          let playNote = (index) => {
+            osc.frequency.setValueAtTime(freqs[index], t(0));
+            osc2.frequency.setValueAtTime(freqs[index] * 0.75, t(0));
+          };
+          return () => {
+            attackDecay(gain.gain, 0.0, 0.5);
+            playNote(0);
+            setTimeout(() => playNote(1), (1000 * delayTime) / 4);
+            setTimeout(() => playNote(2), (1000 * delayTime) / 2);
+          };
+        };
+
+        let setupDeathProcessor = () => {
+          let gain = context.createGain();
+          gain.gain.setValueAtTime(0, t(0));
+
+          let detuneCents = 20;
+          for (let i = -1; i <= 1; ++i) {
+            let osc = context.createOscillator();
+            osc.type = "sawtooth";
+            osc.frequency.value = 55 * Math.pow(2, (i * detuneCents) / 1200);
+            osc.start();
+            osc.connect(gain);
+          }
+
+          let filter = context.createBiquadFilter();
+          filter.Q.setValueAtTime(1, t(0));
+          filter.frequency.setValueAtTime(1000, t(0));
+          filter.type = "lowpass";
+          gain.connect(filter);
+          filter.connect(reverb);
+          filter.connect(context.destination);
+
+          return () => {
+            attackDecay(gain.gain, 0.01, 0.5);
+          };
+        };
+
+        let setupAmbient = () => {
+          let delay = context.createDelay(1.0);
+          delay.delayTime.setValueAtTime(1.0, t(0));
+          let delayGain = context.createGain();
+          delayGain.gain.setValueAtTime(0.8, t(0));
+
+          let gain = context.createGain();
+          gain.gain.setValueAtTime(0, t(0));
+
+          let oscs = Array(3)
+            .fill()
+            .map((fr) => {
+              let lfo = context.createOscillator();
+              lfo.frequency.value = 0.1 + 0.1 * Math.random();
+              lfo.type = "sine";
+              lfo.start();
+
+              let lfoGain = context.createGain();
+              lfoGain.gain.setValueAtTime(10, t(0));
+              lfo.connect(lfoGain);
+
+              let oscGain = context.createGain();
+              let oscGainLfo = context.createOscillator();
+              oscGainLfo.frequency.value = 0.05 + 0.05 * Math.random();
+              oscGainLfo.type = "sine";
+              oscGainLfo.start();
+
+              let osc = context.createOscillator();
+              osc.type = "sine"; // could also try "triangle", but checkpoint becomes too quiet
+              osc.start();
+
+              oscGainLfo.connect(oscGain.gain);
+              lfoGain.connect(osc.detune);
+              osc.connect(oscGain);
+              oscGain.connect(gain);
+              return osc;
+            });
+
+          gain.connect(delay);
+          delay.connect(delayGain);
+          delayGain.connect(delay);
+          delay.connect(reverb);
+
+          let chords = [
+            [0, 5, 9],
+            [3, 10, 12],
+            [2, 5, 7],
+            [0, 3, 10],
+            [5, 7, 10],
+            [0, 2, 7],
+          ];
+          let currentChord = -1;
+
+          let setChord = (notes) => {
+            for (let i = 0; i < oscs.length; ++i)
+              oscs[i].frequency.setValueAtTime(
+                220 * Math.pow(2, notes[i] / 12),
+                t(0),
+              );
+          };
+          let nextChord = () => {
+            currentChord = (currentChord + 1) % chords.length;
+            let notes = chords[currentChord];
+            setChord(notes);
+          };
+
+          setInterval(() => {
+            // random chord inversions
+            let notes = chords[currentChord].map(
+              (n) => n + 12 * (Math.floor(Math.random() * 3) - 1),
+            );
+            setChord(notes);
+          }, 2000);
+
+          nextChord();
+          return [
+            (on) => {
+              if (on) {
+                gain.gain.linearRampToValueAtTime(0.05, t(5));
+              } else {
+                gain.gain.cancelScheduledValues(t(0));
+                gain.gain.setValueAtTime(0, t(0));
+              }
+            },
+            nextChord,
+          ];
+        };
+
+        let typingProcs = Array(3).fill().map(setupTypingProcessor);
+        let typingProcIndex = 0;
+        let menuProc = setupMenuChangeProcessor();
+        let checkpointProc = setupCheckpointProcessor();
+        let deathProc = setupDeathProcessor();
+        let ambientProc = setupAmbient();
+
+        return {
+          ctx: context,
+          startTime: t(0),
+          typingFn: () => {
+            typingProcs[++typingProcIndex % typingProcs.length]();
+          },
+          menuChangeFn: (isLeftRight) => {
+            menuProc(isLeftRight ? 550 : 660);
+          },
+          checkpoint: () => {
+            checkpointProc();
+            ambientProc[1]();
+          },
+          death: deathProc,
+          ambient: ambientProc,
+        };
+      }
+
+      let audioProcessor = null;
+
+      function getAudioProcessor() {
+        if (!audioProcessor) audioProcessor = setupAudioProcessor();
+        return audioProcessor;
+      }
+      async function print_2d(c, text, em, cancelFn, textUpdatedCb, typingCb) {
+        let print,
+          ms = 0,
+          w = "+", // regex quantifier for how many characters to process, e.g '{,3}', '+'. Empty string is the same as '{1}'
+          tail = text.shift(),
+          [x, y] = [0, 0],
+          font,
+          color = "#9c4",
+          typing = true,
+          n = {
+            valueOf() {
+              y += 1.4 * em;
+              x = 1.0 * em;
+            },
+          },
+          wait = (t) => new Promise((resolve) => setTimeout(resolve, t));
+
+        while (tail) {
+          if (cancelFn()) return;
+          if (tail.startsWith("!")) {
+            eval(tail.substring(1));
+            tail = "";
+          } else if (tail.startsWith("_")) {
+            await wait(tail.substring(1));
+            tail = "";
+          } else {
+            while (tail) {
+              await wait(ms);
+              if (cancelFn()) return;
+              [_, print, tail] = tail.match(`(^.${w})(.+)?`);
+              if (print !== " ") typingCb();
+              c.font = font;
+              c.shadowColor = (c.fillStyle = color) + "b"; // #rgb -> #rgba
+              c.shadowBlur = 12;
+              c.fillText(print, x, y);
+              textUpdatedCb();
+              x += c.measureText(print).width;
+            }
+          }
+          if (!tail || tail.length == 0) tail = text.shift();
+        }
+      }
+
+      let cliFont = "bold 1.4rem 'Andale Mono', 'Courier New', monospace";
+      let dialogFont =
+        "bold italic 2rem 'Lucida Sans Unicode', 'Lucida Grande', sans-serif";
+      let logoFont = "bold 6rem Impact, Charcoal, sans-serif";
+
+      let startCutsceneData = (w, h) => [
+        `!n+n;ms=50;font="${cliFont}";color='#9c4'`,
+        "[totosz@vlt1337 ~]$ ",
+        "_500",
+        "!color='#ccc';w=''",
+        "hack https://asodih90xvy809.com/90as8y/",
+
+        "!+n;ms=300",
+        ". . .  ",
+
+        "!n+n;color='#999';ms=50;w='+'",
+        "HTTP/2 404",
+        "!+n",
+        "content-type: text/html",
+        "!+n",
+        "content-length: 1565",
+        "!+n",
+        `date: ${new Date().toDateString()}`,
+        "!n+n",
+
+        "<!DOCTYPE html>",
+        "!+n",
+        "<html lang=en>",
+        "!+n",
+        "<title>Error 404 (Not Found)!!1</title>",
+        "!+n",
+        "<p>The requested URL was not found on this server. Tough luck :-)",
+
+        "!n+n,ms=500;color='#f83'",
+        "[ERROR] Hacking failed with code 0x04729632",
+
+        "!+n;color='#9c4'",
+        "[totosz@vlt1337 ~]$ ",
+
+        "!x_=x;y_=y", // save caret location
+
+        "_1200",
+        `!;y=${h}-6*em;x=17*em;ms=60;w='';color='#baa';font="${dialogFont}"`,
+        "@#$%! *They* moved the page again.",
+        "!+n",
+        "_800",
+        `!;c.fillStyle='#000';c.shadowBlur=0;c.clearRect(0,y-4*em,${w},${h})`,
+        `!;ms=60;y=${h}-6*em;x=17*em`,
+        "You can hide it but I'll find it anyway!",
+        "_800",
+        `!;c.fillStyle='#000';c.shadowBlur=0;c.clearRect(0,y-4*em,${w},${h})`,
+
+        `!;x=x_;y=y_;ms=50;color='#ccc';w='';font="${cliFont}"`,
+        "./choch https://asodih90xvy809.com/ --find-missing-page",
+        "!;ms=800",
+        " ",
+        "!;ms=50",
+        "--please",
+
+        "_400",
+        `!;c.fillStyle='#000';c.shadowBlur=0;c.clearRect(0,0,${w},${h});y=2.5*em`,
+        "!n+n;ms=500;w='+',color='#fff'",
+        "Initialize crawler ",
+        "!;x=42*em;color='#9c4'",
+        "[ OK ]",
+        "!+n;color='#fff'",
+        "Generate search route ",
+        "!;x=42*em;color='#9c4'",
+        "[ OK ]",
+        "!+n;color='#fff'",
+        "Calculate expression matcher ",
+        "!;x=42*em;color='#9c4'",
+        "[ OK ]",
+        "!+n;color='#fff'",
+        "Perform automated search ",
+        "_500",
+        "!;x=42*em;color='#f83'",
+        "[FAIL]",
+        "!n+n;color='#fff';x=13*em",
+        "Manual guidance required. Press enter to start",
+        "!w='';ms=200",
+        ". . .  ",
+      ];
+
+      let endCutsceneData = (w, h, isSpeedrun, timerTime, difficulty) => {
+        let speedrunElements = isSpeedrun
+          ? [
+              `overall-time: ${timerTime}`,
+              "!+n",
+              `difficulty: ${difficulty}`,
+              "!+n",
+            ]
+          : [];
+        return [
+          `!n+n;ms=50;font="${cliFont}";color='#9c4';w='+'`,
+          "[totosz@vlt1337 ~]$ ",
+          "_1000",
+          "!color='#ccc';w=''",
+          "hack https://asodih90xvy809.com/90as8y/",
+
+          "!+n;ms=300",
+          ". . .  ",
+          "!n+n;color='#ccc';ms=50;w='+'",
+          "HTTP/2 ",
+          "!color='#fff'",
+          "200 OK",
+          "!+n;color='#ccc'",
+          "content-type: text/html",
+          "!+n",
+          "content-length: 2273",
+          "!+n",
+          ...speedrunElements,
+          `date: ${new Date().toDateString()}`,
+          "!n+n",
+
+          "<!DOCTYPE html>",
+          "!+n",
+          "<html lang=en>",
+          "!+n",
+          "<title>Hello there!</title>",
+          "!+n",
+          `<p>${
+            isSpeedrun ? "How did you get here so fast?!" : "You're welcome!"
+          }</p>`,
+          "_500",
+          "!n+n;color='#9c4'",
+          "[totosz@vlt1337 ~]$ ",
+
+          "_1200",
+          `!;y=${h}-6*em;x=24*em;ms=60;w='';color='#f80';font="${dialogFont}"`,
+          "Finally... I found it.",
+
+          `_${isSpeedrun ? 10000 : 3000}`,
+          `!c.clearRect(0,0,${w},${h});y=2.5*em;+n;ms=50;font="${cliFont}";color='#9c4'`,
+          "CHOCH",
+          "_1500",
+          `!+n;color='#ccc'`,
+          "A game by ",
+          `!color='#f22'`,
+          "kostik1337",
+          `!color='#ccc'`,
+          " & ",
+          `!color='#44f'`,
+          "lampysprites",
+          "_400",
+          "!n+n;color='#ccc'",
+          "Thank you for playing!",
+          "_10000",
+        ];
+      };
+      const STATE_MENU = 0;
+      const STATE_START_CUTSCENE = 1;
+      const STATE_GAME = 2;
+      const STATE_END = 3;
+
+      let gameState = -1;
+
+      let player = {};
+
+      let gameSettings = {
+        difficulty: 1,
+        graphics: 2,
+        difficultyVariants: ["very easy", "easy", "normal", "hardcore"],
+        graphicsVariants: ["low", "medium", "high"],
+        currentSelection: 0,
+        speedrunMode: false,
+      };
+
+      function init(gl, buf) {
+        ctx.time = 0;
+
+        // main game shader
+        let shaderProgram = initShaderProgram(gl, vsSource, gameFsSource);
+        let uniformLoc = (s) => gl.getUniformLocation(shaderProgram, s);
+        ctx.programInfo = {
+          program: shaderProgram,
+          uTime: uniformLoc("t"),
+          uRes: uniformLoc("res"),
+          uPos: uniformLoc("pos"),
+          uCam: uniformLoc("cam"),
+          uSpeed: uniformLoc("speed"),
+        };
+
+        // game postproc shader
+        shaderProgram = initShaderProgram(gl, vsSource, postprocFsSource);
+        uniformLoc = (s) => gl.getUniformLocation(shaderProgram, s);
+        ctx.postprocProgramInfo = {
+          program: shaderProgram,
+          uRes: uniformLoc("res"),
+          uTex: uniformLoc("tex"),
+          uFactors: uniformLoc("fact"),
+        };
+
+        // canvas postproc shader (crt)
+        ctx.canvasTex = createPostprocTexture(gl, 0, 0);
+        shaderProgram = initShaderProgram(gl, vsSource, canvasPostprocFsSource);
+        uniformLoc = (s) => gl.getUniformLocation(shaderProgram, s);
+        ctx.canvasPostprocProgramInfo = {
+          program: shaderProgram,
+          uRes: uniformLoc("res"),
+          uTex: uniformLoc("tex"),
+          uTime: uniformLoc("t"),
+          uEndFactor: uniformLoc("ef"),
+        };
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+        const attrPosition = gl.getAttribLocation(shaderProgram, "aPos");
+        gl.vertexAttribPointer(attrPosition, 2, gl.FLOAT, false, 0, 0);
+        gl.enableVertexAttribArray(attrPosition);
+
+        updateSpeedrunMode();
+
+        setState(STATE_MENU);
+      }
+
+      function recreateGameFramebufferAndTex() {
+        let divide = [4, 2, 1][gameSettings.graphics];
+        ctx.fbTexData = createFramebufferWithTexture(
+          ctx.gl,
+          canvasW() / divide,
+          canvasH() / divide,
+          ctx.fbTexData,
+        );
+      }
+
+      function updateSpeedrunMode() {
+        document.querySelector("#timer").style.visibility =
+          gameSettings.speedrunMode ? "visible" : "hidden";
+      }
+
+      function setState(state) {
+        gameState = state;
+        if (state == STATE_MENU) {
+          if (audioProcessor) audioProcessor.ambient[0](false);
+          updateMenuCanvas();
+        } else if (state == STATE_START_CUTSCENE) {
+          showCutscene(startCutsceneData, STATE_START_CUTSCENE);
+        } else if (state == STATE_END) {
+          showCutscene(
+            (w, h) =>
+              endCutsceneData(
+                w,
+                h,
+                gameSettings.speedrunMode,
+                document.querySelector("#timer").innerHTML,
+                gameSettings.difficultyVariants[gameSettings.difficulty],
+              ),
+            STATE_END,
+          );
+        } else if (state == STATE_GAME) {
+          ctx.time = 0;
+          ctx.timerTimeStart = new Date().getTime();
+
+          if (audioProcessor) audioProcessor.ambient[0](true);
+          recreateGameFramebufferAndTex();
+
+          player = {
+            pos: new Vec2(0, 0),
+            cam: new Vec2(0, 0),
+            maxVelocity: 0.005,
+            reqSpeed: new Vec2(0, 0),
+            speed: new Vec2(0, 0),
+            movementStates: [0, 0, 0, 0],
+            lastCheckpointId: -1,
+            lastCheckpointPos: new Vec2(0.5, -0.9),
+            isDead: false,
+            deathFactor: 0,
+            checkpointFactor: 0,
+            endFactor: 0,
+            isEnd: false,
+
+            solidNormal: null,
+          };
+          playerResurrect();
+          player.cam.set(player.pos.x, player.pos.y);
+        }
+      }
+
+      function playerResurrect() {
+        player.isDead = false;
+        player.deathFactor = 0;
+        player.speed.set(0, 0);
+        player.pos.set(player.lastCheckpointPos.x, player.lastCheckpointPos.y);
+      }
+
+      function timerTimeFormat() {
+        const t = new Date().getTime() - ctx.timerTimeStart;
+        const ms = t % 1000,
+          s = Math.floor(t / 1000) % 60,
+          m = Math.floor(t / 1000 / 60);
+        const leftPad2 = (v) => (v < 10 ? `0${v}` : v);
+        const leftPadMs = (v) => (v < 10 ? `00${v}` : v < 100 ? `0${v}` : v);
+        return `${leftPad2(m)}:${leftPad2(s)}:${leftPadMs(ms)}`;
+      }
+
+      function update() {
+        if (joy) joyInput(joy, onKeyEvent); // can only poll buttons, no events
+
+        if (gameState != STATE_GAME) {
+          if (player) player.endFactor *= 0.99;
+          return;
+        }
+
+        if (gameSettings.speedrunMode) {
+          document.querySelector("#timer").innerHTML = timerTimeFormat();
+        }
+
+        if (player.isDead) {
+          player.speed.set(0, 0);
+        } else {
+          player.speed.mixEq(player.reqSpeed.x, player.reqSpeed.y, 0.3);
+
+          player.pos.addEq(player.speed.x, player.speed.y);
+          if (player.solidNormal != null) {
+            let dot = player.solidNormal.dot(player.speed);
+            if (dot < 0) {
+              let offset = player.solidNormal.mul(-dot * 1);
+              player.pos.addEq(offset.x, offset.y);
+            }
+          }
+        }
+        let speedOffset = 0;
+        player.cam.mixEq(
+          player.pos.x + player.speed.x * speedOffset,
+          player.pos.y + player.speed.y * speedOffset,
+          0.1,
+        );
+
+        player.deathFactor *= 0.92;
+        player.checkpointFactor *= 0.95;
+        if (player.isEnd) {
+          player.endFactor += (1 - player.endFactor) * 0.03;
+          if (player.endFactor > 0.99) setState(STATE_END);
+        }
+      }
+
+      function render(gl) {
+        let dt = [1 / 80, 1 / 70, 1 / 60, 1 / 50][gameSettings.difficulty];
+        ctx.time += dt;
+        if (
+          gameState == STATE_MENU ||
+          gameState == STATE_START_CUTSCENE ||
+          gameState == STATE_END
+        ) {
+          const programInfo = ctx.canvasPostprocProgramInfo;
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          gl.bindTexture(gl.TEXTURE_2D, ctx.canvasTex);
+          gl.useProgram(programInfo.program);
+          gl.uniform2f(programInfo.uRes, canvasW(), canvasH());
+          gl.uniform1i(programInfo.uTex, 0);
+          gl.uniform1f(programInfo.uTime, ctx.time);
+          gl.uniform1f(programInfo.uEndFactor, player.endFactor || 0);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        } else if (gameState == STATE_GAME) {
+          // render all game stuff to texture
+          gl.bindFramebuffer(gl.FRAMEBUFFER, ctx.fbTexData[0]);
+          let programInfo = ctx.programInfo;
+          gl.useProgram(programInfo.program);
+          gl.uniform1f(programInfo.uTime, ctx.time);
+          gl.uniform2f(programInfo.uRes, ctx.fbTexData[2], ctx.fbTexData[3]);
+          gl.uniform2f(programInfo.uPos, player.pos.x, player.pos.y);
+          gl.uniform2f(
+            programInfo.uSpeed,
+            player.speed.x / player.maxVelocity,
+            player.speed.y / player.maxVelocity,
+          );
+          gl.uniform4f(
+            programInfo.uCam,
+            player.cam.x,
+            player.cam.y,
+            3 * 1.3,
+            3,
+          );
+
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+          let pixelValues = new Uint8Array(3 * 4);
+          gl.readPixels(0, 0, 3, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixelValues);
+
+          // post-process texture
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          programInfo = ctx.postprocProgramInfo;
+          gl.bindTexture(gl.TEXTURE_2D, ctx.fbTexData[1]);
+          gl.useProgram(programInfo.program);
+          gl.uniform2f(programInfo.uRes, canvasW(), canvasH());
+          gl.uniform1i(programInfo.uTex, 0);
+          gl.uniform3f(
+            programInfo.uFactors,
+            player.deathFactor,
+            player.checkpointFactor,
+            player.endFactor,
+          );
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+          if (player.isEnd) return;
+          // solid check
+          if (pixelValues[0] > 1) {
+            player.solidNormal = new Vec2(
+              (2 * pixelValues[1]) / 255 - 1,
+              (2 * pixelValues[2]) / 255 - 1,
+            );
+          } else {
+            player.solidNormal = null;
+          }
+
+          let isCheckpoint = pixelValues[8] > 1;
+          // death check
+          if (pixelValues[4] > 1 && !isCheckpoint && !player.isDead) {
+            player.isDead = true;
+            player.deathFactor = 1;
+            setTimeout(() => {
+              playerResurrect();
+            }, 500);
+            getAudioProcessor().death();
+          }
+
+          // checkpoint check
+          let checkpointId = Math.round(pixelValues[9]);
+          if (isCheckpoint && checkpointId >= player.lastCheckpointId) {
+            if (checkpointId == 255) {
+              player.isEnd = true;
+              getAudioProcessor().checkpoint();
+              return;
+            }
+            if (checkpointId > player.lastCheckpointId) {
+              player.checkpointFactor = 1;
+              getAudioProcessor().checkpoint();
+            }
+            player.lastCheckpointPos.set(player.pos.x, player.pos.y);
+            player.lastCheckpointId = checkpointId;
+          }
+        }
+      }
+
+      let cctx = document.querySelector("#canvas2d").getContext("2d");
+
+      function setTextureCanvasData() {
+        let gl = ctx.gl;
+        gl.bindTexture(gl.TEXTURE_2D, ctx.canvasTex);
+        gl.texImage2D(
+          gl.TEXTURE_2D,
+          0,
+          gl.RGBA,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          cctx.canvas,
+        );
+      }
+
+      function updateMenuCanvas() {
+        // TODO: move these vars to some global place and reuse them
+        let w = cctx.canvas.width,
+          h = cctx.canvas.height;
+        let em = (16 * w) / 1200;
+        let x = 4.1 * em,
+          lh = 4 * em; // line height
+
+        cctx.clearRect(0, 0, w, h);
+        cctx.shadowBlur = 0.75 * em;
+
+        let drawMenuItem = (text, i) => {
+          cctx.font = cliFont;
+          cctx.shadowColor =
+            (cctx.fillStyle =
+              i == gameSettings.currentSelection ? "#9c4" : "#999") + "b";
+          cctx.fillText(text, x, h / 2 - (lh * 3) / 2 + lh * i);
+        };
+        drawMenuItem("play", 0);
+        drawMenuItem(
+          `difficulty: ${
+            gameSettings.difficultyVariants[gameSettings.difficulty]
+          }`,
+          1,
+        );
+        drawMenuItem(
+          `graphics: ${gameSettings.graphicsVariants[gameSettings.graphics]}`,
+          2,
+        );
+
+        cctx.font = logoFont;
+        cctx.shadowColor = cctx.fillStyle = "#742";
+        cctx.strokeStyle = "#fa7";
+        cctx.fillText(" >Ч  О  Ч<", w / 2, h / 2 - em);
+        cctx.strokeText("> Ч О Ч <", w / 2, h / 2 - em);
+        cctx.font = cliFont;
+        cctx.fillText(" ..e.g.g.o.g..c.h.o.c.h..", w / 2, h / 2 + em);
+
+        setTextureCanvasData();
+      }
+
+      function showCutscene(cutsceneDataFn, forState) {
+        let w = cctx.canvas.width,
+          h = cctx.canvas.height;
+        cctx.clearRect(0, 0, w, h);
+        setTextureCanvasData();
+        return print_2d(
+          cctx,
+          cutsceneDataFn(w, h),
+          (16 * cctx.canvas.width) / 1200,
+          () => gameState != forState,
+          setTextureCanvasData,
+          () => {
+            getAudioProcessor().typingFn();
+          },
+        );
+      }
+
+      function onResize() {
+        if (gameState == STATE_MENU) updateMenuCanvas();
+        else if (gameState == STATE_GAME) recreateGameFramebufferAndTex();
+      }
+      var ctx = {};
+
+      let canvasW = () => ctx.canvas.clientWidth;
+      let canvasH = () => ctx.canvas.clientHeight;
+
+      function main() {
+        var canvas = document.querySelector("#glcanvas");
+        var gl = canvas.getContext("webgl");
+
+        handleResize();
+
+        ctx.canvas = canvas;
+        ctx.gl = gl;
+
+        const buffer = initScreenQuadBuffer(gl);
+        init(gl, buffer);
+
+        loop();
+      }
+
+      function loop() {
+        const gl = ctx.gl;
+
+        gl.viewport(0, 0, canvasW(), canvasH());
+
+        render(gl);
+
+        window.requestAnimationFrame(loop);
+      }
+
+      function handleResize() {
+        ["glcanvas", "canvas2d"].forEach((id) => {
+          const canvas = document.getElementById(id);
+          canvas.width = window.innerWidth;
+          canvas.height = window.innerHeight;
+          em = Math.round((16 * Math.min(canvas.width, canvas.height)) / 1200);
+          document.querySelector("html").style.fontSize = em + "px";
+          onResize();
+        });
+      }
+
+      var keyFunction = (e, pressed) => {
+        if (!e.repeat) onKeyEvent(e.which, pressed);
+      };
+      window.addEventListener("keydown", (e) => keyFunction(e, 1));
+      window.addEventListener("keyup", (e) => keyFunction(e, 0));
+      window.addEventListener("load", main, false);
+      window.addEventListener("resize", handleResize);
+      window.setInterval(() => update(), 16);
+      let joy;
+      let joyDeadzone = 0.33;
+
+      const AXIS = 0;
+      const BUTTON = 1;
+
+      // arrays where [[1] = type, [2] = axis/button, [3] = key code to emit, [4] = hold]
+      // add 16 to axis value to invert it
+      let layout = [
+        // dpad
+        [1, 13, 38],
+        [1, 16, 39],
+        [1, 14, 40],
+        [1, 15, 37],
+        // thumb
+        [0, 1, 38],
+        [0, 16, 39],
+        [0, 17, 40],
+        [0, 0, 37],
+        // xyab - enter
+        [1, 0, 13],
+        [1, 1, 13],
+        [1, 2, 13],
+        [1, 3, 13],
+        // start - escape
+        [1, 9, 27],
+      ];
+
+      window.addEventListener("gamepadconnected", (e) => (joy = e.gamepad));
+
+      function joyInput(joy, onPressed) {
+        layout.forEach((binding) => {
+          let [type, idx, keycode, repeat] = binding,
+            pressed;
+
+          if (type === BUTTON) {
+            let b = joy.buttons[idx];
+            pressed = b && b.pressed ? 1 : 0; // gamepad might not have that many buttons
+          } else {
+            let v = joy.axes[idx % 16];
+            pressed = v > 0 == idx > 15 ? Math.abs(v) : 0;
+            if (pressed < joyDeadzone) pressed = 0;
+          }
+
+          if (pressed !== repeat) onPressed(keycode, pressed ? 1 : 0);
+
+          binding[3] = pressed;
+        });
+      }
+
+      function onKeyEvent(keyCode, pressed) {
+        let enterPressed = keyCode == 13 && pressed;
+        // arrow keys; wsad; zsqd
+        let index = [38, 40, 37, 39, 87, 83, 65, 68, 90, 87, 81, 68].indexOf(
+          keyCode,
+        );
+        if (index >= 0) index = index % 4;
+
+        // t
+        if (keyCode == 84 && pressed) {
+          gameSettings.speedrunMode = !gameSettings.speedrunMode;
+          updateSpeedrunMode();
+        }
+
+        // r
+        if (
+          gameSettings.speedrunMode &&
+          (gameState == STATE_START_CUTSCENE ||
+            gameState == STATE_GAME ||
+            gameState == STATE_END) &&
+          keyCode == 82
+        ) {
+          setState(STATE_GAME);
+          return;
+        }
+
+        if (gameState == STATE_MENU) {
+          if (pressed > 0) {
+            if (gameSettings.currentSelection == 0 && enterPressed) {
+              setState(STATE_START_CUTSCENE);
+              getAudioProcessor().menuChangeFn(true);
+            }
+            if (index == 0 || index == 1) {
+              let maxSettings = 3;
+              gameSettings.currentSelection =
+                (gameSettings.currentSelection +
+                  (index == 1 ? 1 : maxSettings - 1)) %
+                maxSettings;
+              updateMenuCanvas();
+              getAudioProcessor().menuChangeFn(false);
+            }
+
+            if (index == 2 || index == 3) {
+              if (gameSettings.currentSelection == 1) {
+                let variantsLen = gameSettings.difficultyVariants.length;
+                gameSettings.difficulty =
+                  (gameSettings.difficulty +
+                    (index == 3 ? 1 : variantsLen - 1)) %
+                  variantsLen;
+                updateMenuCanvas();
+                getAudioProcessor().menuChangeFn(true);
+              } else if (gameSettings.currentSelection == 2) {
+                let variantsLen = gameSettings.graphicsVariants.length;
+                gameSettings.graphics =
+                  (gameSettings.graphics + (index == 3 ? 1 : variantsLen - 1)) %
+                  variantsLen;
+                updateMenuCanvas();
+                getAudioProcessor().menuChangeFn(true);
+              }
+            }
+          }
+        } else if (gameState == STATE_START_CUTSCENE) {
+          if (enterPressed) setState(STATE_GAME);
+        } else if (gameState == STATE_END) {
+          //if (enterPressed) setState(STATE_MENU)
+        } else if (gameState == STATE_GAME) {
+          let ms = player.movementStates;
+
+          ms[index] = pressed;
+          let speed = player.maxVelocity;
+          player.reqSpeed.set((ms[3] - ms[2]) * speed, (ms[0] - ms[1]) * speed);
+
+          if (keyCode == 27) {
+            setState(STATE_MENU);
+          }
+        }
+      }
+    </script>
+
+    <div id="timer">00:00:000</div>
+
+    <script type="module">
+      const platformInfo = await ext.runtime.getPlatformInfo();
+      const webview = await ext.webviews.getCurrent();
+      const window = await ext.webviews.getAttachedWindow(webview.id);
+      const insetSize = await ext.windows.getInsetSize(window.id);
+
+      if (platformInfo.os !== "mac" && insetSize) {
+        document.getElementById("frame").style.right = `${insetSize.width}px`;
+      }
+    </script>
+  </body>
+</html>

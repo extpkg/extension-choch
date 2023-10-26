@@ -1,0 +1,117 @@
+name: Cook and release an EXT app
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - package.json
+
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cook release info
+        id: release
+        run: |
+          LATEST_TAG_RAW=$(git describe --tags $(git rev-list --tags --max-count=1) 2>/dev/null || echo "")
+          LATEST_TAG=${LATEST_TAG_RAW#v}
+          PKG_VERSION=$(jq -r '.version' package.json)
+
+          if [[ "$PKG_VERSION_NUM" == "1.0.0" && -z "$LATEST_TAG" || "$PKG_VERSION" > "$LATEST_TAG" ]]; then
+            echo "should=true" >> $GITHUB_OUTPUT
+
+            EXT_NAME=$(jq -r '.name' public/manifest.json)
+            echo "ext_name=$EXT_NAME" >> $GITHUB_OUTPUT
+
+            PKG_VERSION="v$(jq -r '.version' package.json)"
+            echo "tag=$PKG_VERSION" >> $GITHUB_OUTPUT
+
+            if [[ $PKG_VERSION == *"alpha"* ]]; then
+              echo "override=alpha" >> $GITHUB_OUTPUT
+            elif [[ $PKG_VERSION == *"beta"* ]]; then
+              echo "override=beta" >> $GITHUB_OUTPUT
+            else
+              echo "override=latest" >> $GITHUB_OUTPUT  
+            fi
+          else
+            echo "should=false" >> $GITHUB_OUTPUT
+          fi
+
+      - uses: oven-sh/setup-bun@v1
+        if: steps.release.outputs.should == 'true'
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        if: steps.release.outputs.should == 'true'
+        run: bun install
+
+      - name: Build project
+        if: steps.release.outputs.should == 'true'
+        run: bun run build
+
+      - name: Create EXT extension from dist
+        if: steps.release.outputs.should == 'true'
+        run: |
+          echo "${{ secrets.PRIVATE_KEY }}" > key.pem
+          bunx ext-packager pack ./dist -k key.pem -o ${{ github.event.repository.name }}-${{ steps.release.outputs.tag }}.ext -f
+          bunx ext-packager pack ./dist -k key.pem -o ${{ github.event.repository.name }}-${{ steps.release.outputs.override }}.ext -f
+
+      - name: Delete current release
+        if: steps.release.outputs.should == 'true'
+        run: |
+          gh release delete ${{ steps.release.outputs.override }} --cleanup-tag -y
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create versioned release
+        if: steps.release.outputs.should == 'true'
+        id: create_prerelease
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.release.outputs.tag }}
+          name:
+            ${{ steps.release.outputs.ext_name }} ${{
+            steps.release.outputs.tag}}
+          artifacts:
+            "${{ github.event.repository.name }}-${{ steps.release.outputs.tag
+            }}.ext"
+          artifactContentType: "application/zip"
+          body:
+            "This is the ${{ steps.release.outputs.tag }} release of ${{
+            github.repository }}"
+          prerelease:
+            ${{ contains(steps.release.outputs.tag, 'alpha') ||
+            contains(steps.release.outputs.tag, 'beta') }}
+          makeLatest: false
+
+      - name: Create release
+        if: steps.release.outputs.should == 'true'
+        id: create_release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.release.outputs.override }}
+          name:
+            ${{ steps.release.outputs.ext_name }} ${{
+            steps.release.outputs.override }}
+          artifacts:
+            "${{ github.event.repository.name }}-${{
+            steps.release.outputs.override }}.ext"
+          artifactContentType: "application/zip"
+          prerelease:
+            ${{ steps.release.outputs.override == 'alpha' ||
+            steps.release.outputs.override == 'beta'  }}
+          draft: false
+          body:
+            "This is the ${{ steps.release.outputs.override }} release of ${{
+            github.repository }}"
+          makeLatest: ${{ steps.release.outputs.override == 'latest' }}
