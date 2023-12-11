@@ -13,3 +13,6 @@ CHOCH: 404 Game Not Found
 
 Run `npm run dev` to watch `src` and `public` directories and rebuild the
 project on changes
+
+## Source
+https://github.com/kostik1337/CHOCH
