@@ -4,8 +4,9 @@
   "description": "CHOCH: 404 Game Not Found",
   "type": "module",
   "scripts": {
-    "build": "cross-env NODE_ENV=production node ./scripts/build.mjs",
     "dev": "nodemon",
+    "build": "cross-env NODE_ENV=production node ./scripts/build.mjs",
+    "release": "cross-env NODE_ENV=production node ./scripts/release.mjs",
     "format": "prettier --write './**/*.{ts,tsx,js,jsx,json,md}'",
     "lint": "eslint 'src/**/*.{ts,tsx,js,jsx}' --quiet",
     "lint:fix": "eslint 'src/**/*.{ts,tsx,js,jsx}' --fix",

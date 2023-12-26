@@ -16,26 +16,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: oven-sh/setup-bun@v1
+      - uses: actions/setup-node@v3
         with:
-          bun-version: latest
+          node-version: "lts/*"
 
-      - run: bun install
-
-      - run: bun run build
+      - run: npm ci
 
       - name: Create EXT extension from dist
         run: |
           echo "${{ secrets.PRIVATE_KEY }}" > key.pem
-          bunx ext-packager pack ./dist -k key.pem -o ${{ vars.S3_FILE }} -f
-          bunx ext-packager pack ./dist -k key.pem -o ${{ vars.S3_FILE }} -f
+          npm run build
+          npm run release -- ${{ vars.S3_FILE }}
 
       - name: Delete the current release
-        run: |
-          gh release delete latest --cleanup-tag -y
-        continue-on-error: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: dev-drprasad/delete-tag-and-release@v1.0.1
+        with:
+          tag_name: latest
+          delete_release: true
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cook release info
         id: info
@@ -49,10 +47,8 @@ jobs:
         with:
           tag: latest
           name: ${{ steps.info.outputs.ext_name }}
-          artifacts: ${{ vars.S3_FILE }}
+          artifacts: "${{ vars.S3_FILE }},dist.zip"
           artifactContentType: "application/zip"
-          prerelease: false
-          draft: false
           body: "This is the latest release of ${{ github.repository }}"
           makeLatest: true
 
